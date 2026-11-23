@@ -24,6 +24,14 @@ header{background:var(--ink);color:#fff;padding:calc(env(safe-area-inset-top) + 
 .netbar.sync{background:#4e2e2a;color:var(--gold2)}
 .netbar .go{margin-left:auto;font-weight:600;font-size:13px;opacity:.85;white-space:nowrap}
 .qcard{border:2px dashed var(--goldline);background:#fdf3ef}
+.qsplit{font-weight:800;font-size:14px;margin:-4px 0 6px;overflow-wrap:anywhere;}
+.qbtns{display:flex;flex-wrap:wrap;gap:8px;margin:0 0 8px;}
+.qbtns .btn{margin-top:0;flex:1 1 140px;min-height:44px;}
+.pbnote{font-size:13px;margin:8px 0 0;}
+.pbwait{font-size:13px;align-self:center;flex:1 1 140px;}
+.item.pend{padding-left:8px;padding-right:8px;border-radius:10px;}
+.bact.pb{flex-wrap:wrap;}
+.badge.lock{background:#4e2e2a;color:var(--gold2);}
 .item.pend,tr.pend td{background:#fdf3ef}
 .item.pend .no{color:#8a5a00}
 .badge.syncing{background:#4e2e2a;color:var(--gold2)}
@@ -551,7 +559,7 @@ input.basein{font-size:34px;font-weight:900;text-align:center;min-height:74px}
 <div class="toast" id="toast"></div>
 <script>
 'use strict';
-const APP_VERSION = 53;
+const APP_VERSION = 54;
 const CFG_KEY = 'chin-gold-tracker-config', CACHE_KEY = 'chin-gold-tracker-state', BQ_KEY = 'chin-gold-tracker-batchquote', Q_KEY = 'chin-gold-tracker-queue', DED_KEY = 'chin-gold-tracker-deduction', LQ_KEY = 'chin-gold-tracker-lastquote', QM_KEY = 'chin-gold-tracker-quotemode', BB_KEY = 'chin-gold-tracker-batchbuy', TM_KEY = 'chin-gold-tracker-tabmask', RN_KEY = 'chin-gold-tracker-sellbase', BE_KEY = 'chin-gold-tracker-batchest', WU_KEY = 'chin-gold-tracker-weightunit', OBP_KEY = 'chin-gold-tracker-offbase';
 const OFFLINE_MSG = "You're offline. This needs internet.";
 const SYNC_EVERY_MS = 60000;
@@ -577,7 +585,7 @@ const sgn = n => n == null ? '' : (round2(n) < 0 ? 'neg' : 'pos');
 // hidden) and restored on every re-render and reload, so the app opens as it was left.
 // Buy (v17): its profit (desktop "Last added" list) is ALWAYS shown, has no eye and no toggle, and no other tab affects it.
 // Quote shows no profit.
-const MASK = '₱ ••••••';
+const MASK = '₱ ••••••';   // v58: no-break space, so a hidden profit never splits over two lines
 const EYE_OPEN = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7S1 12 1 12z"/><circle cx="12" cy="12" r="3"/></svg>';
 const EYE_OFF = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 19c-7 0-11-7-11-7a18.45 18.45 0 0 1 5.06-5.94"/><path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 7 11 7a18.5 18.5 0 0 1-2.16 3.19"/><path d="M14.12 14.12a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>';
 const GROUPS = { stock: ['list', 'refine'], sales: ['batches', 'sales', 'calc', 'refnow'], dash: ['stock', 'month', 'all'] };   // refnow: v18 "If refined now" card
@@ -1147,15 +1155,15 @@ async function initOutbox() {
   }
   if (connected()) await bindIfPossible();
   // v47: pending batch estimates already on this device join the same outbox (one unsent row per batch).
-  const all = beAll(), ids = new Set((ST && ST.batches || []).map(x => x.id));
+  const all = beAll(), ids = new Set((ST ? vBatches() : []).map(x => x.id));
   Object.keys(all).forEach(id => {
     const e = all[id]; if (!(e && (e.pb || e.pa))) return;
-    if (ST && ST.batches && ST.batches.length && !ids.has(id)) return;
+    if (ST && ids.size && !ids.has(id)) return;
     if (Q.some(x => isEst(x) && x.batchId === id && !x.error && !x.hold)) return;
     const it = { action: 'setBatchEstimate', rid: rid(), batchId: id, createdAt: new Date().toISOString(), tries: 0 };
     if (e.pb) it.sellBase = hasNum(e.base) ? e.base : '';
     if (e.pa) it.actualG = hasNum(e.actual) ? e.actual : '';
-    Q.push(it);
+    Q.push(stampDeps(it));
   });
   if (Q.length) { await persistOutbox(); askPersist(); }
   obLoaded = true;
@@ -1177,6 +1185,7 @@ async function enqueue(it) {
     if (!okBind) { alert('Waiting items on this device are for a different sheet than the one in Settings. Export them from Settings, or delete them, before saving new ones here.'); return false; }
   } else if (!obMeta.fp && CFG && CFG.token) { obMeta = { url: normUrl(CFG.url), fp: await tokenFp(CFG.token) }; }
   if (Q.some(x => x.rid === it.rid)) return true;
+  stampDeps(it);
   Q.push(it);
   askPersist();
   const ok = await persistOutbox();
@@ -1199,14 +1208,121 @@ function conflictHold(msg) {
 // v49: a synced purchase's No. is saved into the actions waiting on it, so a reload before they sync cannot lose it.
 async function bindWaiters(r, no) {
   for (const x of Q.filter(y => (y.waitRids || []).includes(r)))
-    await qUpdate(x.rid, y => { y.waitRids = y.waitRids.filter(w => w !== r); y.expectSheetNos = (y.expectSheetNos || y.nos || []).concat([no]); });
+    await qUpdate(x.rid, y => { y.waitRids = y.waitRids.filter(w => w !== r); y.expectSheetNos = (y.expectSheetNos || y.nos || []).concat([no]);
+      (y.items || []).forEach(i => { if (i && i.rid === r) i.no = no; }); });   // v54 (Lucas v58): the pending batch's item list
 }
-function waitingOn(it) { return (it.waitRids || []).filter(r => Q.some(x => x.rid === r)); }
+function waitingOn(it) {
+  const w = (it.waitRids || []).filter(r => Q.some(x => x.rid === r));
+  if (!isPur(it) && !isRefine(it)) { const ids = qIds(it), at = Q.indexOf(it);   // v58: a pending batch's own refine goes first
+    Q.forEach((r, i) => { if (isRefine(r) && r.batchId && ids.includes(String(r.batchId)) && (at < 0 || i < at) && !w.includes(r.rid)) w.push(r.rid); }); }
+  return w;
+}
 function resolveNos(it) {
   const nos = (it.expectSheetNos || it.nos || []).map(Number).filter(n => n > 0);
   (it.waitRids || []).forEach(r => { if (syncedNo[r] > 0) nos.push(Number(syncedNo[r])); });
   const seen = {};
   return nos.filter(n => (seen[n] ? false : (seen[n] = true))).sort((a, b) => a - b);
+}
+
+// ---------- v58: one effective view = last confirmed sheet state (ST) + this device's waiting actions (Q) ----------
+// effectiveState is pure: it never changes ST or Q and is never saved (CACHE_KEY keeps only what the sheet sent;
+// getState replaces ST and the view simply re-projects). Every screen reads it (Stock list, Refining, Dashboard
+// stock boxes, If refined now, pickers). A queued refine (Batch refine, ticked refine, Group 99.8%) moves its items
+// out of In stock into a pending batch on Refining at once, under the batch ID the sheet will get. Waiting buys are
+// always in the In stock list (not only the waiting card). Rules kept: the fee is inside cost and never shown on its
+// own; a refined batch counts as ONE item at its refined weight and is still in stock; value = base × purity × grams.
+const itemG = (x, bhy) => itemBhy(x) > 0 ? itemBhy(x) / (bhy || bhyRate()) : Number(x.grams) || 0;   // Chin: stored BHY or typed unit
+const qIds = it => (it.batchIds || []).concat(it.batchId ? [it.batchId] : []).map(String);
+function refineMembers(r, byNo, buyByRid) {
+  const out = [], seen = new Set(), add = (it, key) => { if (!it || seen.has(key)) return; seen.add(key); out.push(it); };
+  const keyOf = it => it.rid && buyByRid.has(it.rid) ? 'r:' + it.rid : Number(it.no) > 0 ? 'n:' + Number(it.no) : 'r:' + (it.rid || '');
+  (Array.isArray(r.items) ? r.items : []).forEach(x => {
+    const live = (x.rid && buyByRid.get(x.rid)) || (Number(x.no) > 0 && byNo.get(Number(x.no))) || x;
+    add(Object.assign({}, x, live, { weight: live.weight, wu: live.wu, weightBhy: itemBhy(live) || itemBhy(x), no: Number(live.no) > 0 ? Number(live.no) : (Number(x.no) || 0), rid: x.rid || live.rid || '' }), keyOf(live.rid ? live : x));
+  });
+  (r.expectSheetNos || r.nos || []).map(Number).filter(n => n > 0).forEach(n => { const it = byNo.get(n); add(it || { no: n, weightBhy: 0, purity: 0, cost: 0, missing: true }, 'n:' + n); });
+  (r.waitRids || []).forEach(x => { const it = buyByRid.get(x); if (it) add(it, 'r:' + x); });
+  return out;
+}
+function effectiveState(st, q, opt) {
+  st = st || {}; q = q || []; opt = opt || {};
+  const s = st.settings || {}, bhy = Number(s.bhyPerGram) || 2, fm = { fullMin: fullMinOf(s) };
+  const sheetStock = st.stock || [], sheetB = st.batches || [];
+  const byNo = new Map(sheetStock.filter(x => Number(x.no) > 0).map(x => [Number(x.no), x]));
+  const buys = q.filter(isPur), buyByRid = new Map(buys.map(x => [x.rid, x]));
+  const coverNo = new Map(), coverRid = new Map(), pendB = [];
+  const waived = new Set(q.filter(isWaive).map(x => String(x.batchId)));
+  q.filter(isRefine).forEach(r => {
+    const M = refineMembers(r, byNo, buyByRid);
+    M.forEach(it => { if (it.rid && buyByRid.has(it.rid)) coverRid.set(it.rid, r.rid); if (Number(it.no) > 0) coverNo.set(Number(it.no), r.rid); });
+    (r.expectSheetNos || r.nos || []).map(Number).filter(n => n > 0).forEach(n => coverNo.set(n, r.rid));
+    (r.waitRids || []).forEach(x => coverRid.set(x, r.rid));
+    const t = M.reduce((a, x) => { const g = itemG(x, bhy), p = Number(x.purity) || 0;
+      a.raw += g; a.ref += g * p; a.cost += Number(x.cost) || 0; if (isFullPurity(p, fm)) a.high++; else { a.sRaw += g; a.sRef += g * p; } return a; },
+      { raw: 0, ref: 0, cost: 0, high: 0, sRaw: 0, sRef: 0 });
+    const div = Number(s.silverDivisor), mul = Number(s.silverMultiplier), rawPct = t.sRaw ? t.sRef / t.sRaw : 0;
+    const silver = div && mul && t.sRef ? (t.sRef * rawPct / div) * mul - t.sRef : 0;
+    const noFee = !!r.noFee || (!!r.batchId && waived.has(String(r.batchId)));
+    const fee = noFee ? 0 : (hasNum(r.fee) ? Number(r.fee) : Number(s.refiningFee) || 0);
+    const base = Number(r.base) > 0 ? Number(r.base) : (Number(opt.base) || Number(st.base) || 0);
+    const cost = round2(t.cost), value = t.ref * base;
+    pendB.push({ id: String(r.batchId || ''), date: r.date || String(manilaAt(r.createdAt) || '').slice(0, 10), at: '', base,
+      items: M.length, rawG: t.raw, refinedG: t.ref, costInclFee: round2(cost + fee), itemsCost: cost, fee, noFee,
+      estValue: round2(value), estProfit: round2(value - cost - fee), silverG: silver, status: 'Refining', recorded: false, canAdd: false,
+      pending: true, rid: r.rid, held: r.error || r.hold || '', group: !!r.noFee, members: M });
+  });
+  const batches = pendB.slice().reverse().concat(sheetB.map(b => waived.has(String(b.id)) && b.status === 'Refining' && !b.noFee && hasNum(b.itemsCost)
+    ? Object.assign({}, b, { noFee: true, fee: 0, costInclFee: Number(b.itemsCost), estProfit: hasNum(b.estValue) ? round2(Number(b.estValue) - Number(b.itemsCost)) : b.estProfit, feeWaiting: true }) : b));
+  return {
+    stock: sheetStock.filter(x => !(Number(x.no) > 0 && coverNo.has(Number(x.no)))),
+    pend: buys.filter(x => !x.error && !x.hold && !coverRid.has(x.rid)),
+    batches, pendBatches: pendB, coverNo, coverRid
+  };
+}
+let evST = null, evStock = null, evBatches = null, evSig = '', evVal = null;
+function qSig() {
+  return Q.map(x => [x.rid, x.action, x.batchId, (x.batchIds || []).join(','), (x.expectSheetNos || []).join(','), (x.waitRids || []).join(','),
+    x.hold ? 1 : 0, x.error ? 1 : 0, x.noFee ? 1 : 0, x.purity, x.weightBhy, x.weight, x.wu, x.cost, x.date, (x.items || []).map(i => i.no).join(',')].join(':')).join('|') + '#' + estBase();
+}
+function EV() {
+  const sig = qSig();
+  if (!evVal || evST !== ST || evStock !== (ST && ST.stock) || evBatches !== (ST && ST.batches) || sig !== evSig) {
+    evVal = effectiveState(ST, Q, { base: estBase() }); evST = ST; evStock = ST && ST.stock; evBatches = ST && ST.batches; evSig = sig;
+  }
+  return evVal;
+}
+const vStock = () => EV().stock;
+const vBatches = () => EV().batches;
+const vBatchOf = id => vBatches().find(x => x.id === id);
+function refineCovers(it) {
+  if (!it) return '';
+  const E = EV();
+  return (it.rid && E.coverRid.get(it.rid)) || (Number(it.no) > 0 && E.coverNo.get(Number(it.no))) || '';
+}
+function addCovers(it) {
+  return !!it && Q.some(s => isAddTo(s) && ((it.rid && (s.waitRids || []).includes(it.rid)) || (Number(it.no) > 0 && (s.expectSheetNos || s.nos || []).map(Number).includes(Number(it.no)))));
+}
+const busyItem = it => !!(refineCovers(it) || directCovers(it) || addCovers(it));
+const freeBuys = () => purchasesQ().filter(x => !busyItem(x));
+const refineOf = r => Q.find(x => x.rid === r);
+// Waiting actions that need this one to reach the sheet first (sale / estimate / No fee on its pending batch, ...).
+function dependentsOf(r) {
+  const it = refineOf(r); if (!it) return [];
+  return Q.filter(x => x.rid !== r && ((x.waitRids || []).includes(r) || (isRefine(it) && it.batchId && !isRefine(x) && !isPur(x) && qIds(x).includes(String(it.batchId)) && Q.indexOf(x) > Q.indexOf(it))));
+}
+// A sale / estimate / No fee / group sale on a pending batch waits for that batch's refine (same batch ID).
+function stampDeps(it) {
+  if (!it || isPur(it) || isRefine(it)) return it;
+  const ids = qIds(it); if (!ids.length) return it;
+  const deps = Q.filter(r => isRefine(r) && r.batchId && ids.includes(String(r.batchId))).map(r => r.rid);
+  if (deps.length) it.waitRids = [...new Set((it.waitRids || []).concat(deps))];
+  return it;
+}
+function busyBadge(it) {
+  if (directCovers(it)) return ' <span class="badge">sale waiting</span>';
+  if (addCovers(it)) return ' <span class="badge">add waiting</span>';
+  const r = refineCovers(it), x = r && refineOf(r);
+  return x ? ` <span class="badge lock">in ${esc(x.batchId || 'refine')}</span>` : '';
 }
 function localDefaultBatchId() {
   const day = (todayISO() || '').replace(/-/g, '');
@@ -1229,6 +1345,24 @@ function purchasePayload(it) {
 function editPayload(it) {
   return { no: it.no, date: it.date, weight: it.weight, wu: it.wu, weightBhy: it.weightBhy, purity: it.purity, cost: it.cost,
     _display: it.weight != null ? it.weight : it.weightBhy, _displayWu: it.wu || 'bhy' };
+}
+// v58: the sheet said "Batch X already exists" (another device made X first). Take the next free ID, move this
+// refine's waiting sale / estimate / No fee to it, and send again with the same rid (nothing was written for it).
+async function retargetRefine(r0) {
+  const it = refineOf(r0); if (!it) return false;
+  try { await api('getState'); } catch (e) { if (e.net) return false; }
+  const old = String(it.batchId || ''), deps = dependentsOf(r0);
+  let id = freeBatchId(old); if (!id || id === old) return false;
+  await qUpdate(r0, x => { x.batchId = id; x.retargets = (x.retargets || 0) + 1; x.retargetFrom = x.retargetFrom || old; });
+  for (const d of deps) await qUpdate(d.rid, x => {
+    if (x.batchId === old) x.batchId = id;
+    if (Array.isArray(x.batchIds)) x.batchIds = x.batchIds.map(b => b === old ? id : b);
+    x.waitRids = [...new Set((x.waitRids || []).concat([r0]))];
+  });
+  // The estimate typed on the pending batch was for OUR batch (the other device's one was not on this screen yet).
+  const all = beAll(); if (old && all[old]) { all[id] = all[old]; delete all[old]; save(BE_KEY, all); }
+  toast(`Batch ID ${old} was already used on the sheet. Saved as ${id}.`, 5000);
+  return true;
 }
 let syncAgain = false;
 async function syncQueue(opt) {
@@ -1348,6 +1482,7 @@ async function syncQueue(opt) {
       } catch (e) {
         if (e.net) { await qUpdate(r0, x => { if (e.sent && !x.uncertainAt) x.uncertainAt = Date.now(); }); stopped = true; break; }
         if (e.auth) { netErr = e.message; stopped = true; break; }
+        if (isRefine(it) && /already exists/i.test(e.message) && (it.retargets || 0) < 3 && await retargetRefine(r0)) { tried.delete(r0); continue; }
         if (conflictHold(e.message)) await qUpdate(r0, x => { x.hold = e.message; x.error = ''; x.uncertainAt = null; });
         else await qUpdate(r0, x => { x.error = e.message; x.uncertainAt = null; });
       } finally { inflight = ''; }
@@ -1390,6 +1525,9 @@ function qDel(r) {
   const it = Q.find(x => x.rid === r); if (!it) return;
   if (inflight === r) return toast('Sending this one now. Try again in a moment.');
   const kind = qKindLabel(it);
+  // v58: a waiting buy that a waiting refine / sale / add-to-batch counts on cannot be deleted under it.
+  if (isPur(it)) { const by = Q.find(x => x.rid !== r && ((x.waitRids || []).includes(r) || (isRefine(x) && refineCovers(it) === x.rid)));
+    if (by) return toast(`This purchase is in ${isRefine(by) ? 'batch ' + (by.batchId || 'refine') : (/^[aeiou]/i.test(qKindLabel(by)) ? 'an ' : 'a ') + qKindLabel(by)} waiting to sync. Delete that first, then this.`, 5000); }
   const line = isPur(it) ? `${qWeightLine(it)} · ${pct(it.purity)} · cost ${peso(it.cost)} · ${fmtDate(it.date)}`
     : isSale(it) ? `Batch ${it.batchId} · ${fmtDate(it.sellDate)}`
     : isOtherSale(it) ? `Other sale · ${fmtDate(it.date)} · received ${peso(it.actual)}`
@@ -1405,6 +1543,16 @@ function qDel(r) {
     : isWaive(it) ? `No fee on ${it.batchId}`
     : `Estimate for ${it.batchId}`;
   const un = it.uncertainAt ? ' (or may have, check the sheet)' : '';
+  const deps = it.uncertainAt ? [] : dependentsOf(r);   // uncertain: it may be on the sheet, so its dependents stay
+  if (deps.length) {
+    const what = deps.map(d => qKindLabel(d)).join(', ');
+    if (!confirm(`Delete this unsynced ${kind}?\n${line}\n\nIt has not reached the sheet. ${deps.length} waiting action${deps.length === 1 ? '' : 's'} on it (${what}) will be deleted too. Its items go back In stock.`)) return;
+    const gone = new Set([r].concat(deps.map(d => d.rid)));
+    Q = Q.filter(x => !gone.has(x.rid));
+    if (isRefine(it) && it.batchId && !(ST && ST.batches || []).some(b => b.id === it.batchId)) beForget(it.batchId);
+    persistOutbox().then(() => { render(); toast('Deleted'); });
+    return;
+  }
   if (it.uncertainAt) { if (!confirm(`Delete this unsynced ${kind}?\n${line}\n\nIt has not reached the sheet${un}.`)) return; }
   else { if (!confirm(`Delete this unsynced ${kind}?\n${line}\n\nIt has not reached the sheet.`)) return; }
   qRemove(r).then(() => { render(); toast('Deleted'); });
@@ -1435,6 +1583,8 @@ function qEdit(r) {
     if (!(typed > 0)) return toast('Enter the weight in ' + unitName()); if (p === null || isNaN(p)) return toast('Enter a valid purity'); if (c === null || isNaN(c) || c < 0) return toast('Enter the cost');
     if (!/^\d{4}-\d{2}-\d{2}$/.test(d)) return toast('Pick the date');
     if (!guardWeight(typed, UNIT, $('#qw').value, UNIT)) return;
+    if (!isFullPurity(p)) { const g = Q.find(x => isRefine(x) && refineCovers(it) === x.rid), wv = g && g.batchId && Q.some(x => isWaive(x) && x.batchId === g.batchId);
+      if (g && (g.noFee || wv)) return toast(`This purchase is in ${g.batchId || 'a group'} with no refining fee (99.8% and up). Below 99.8% would break that group. Delete the group first.`, 5500); }
     await qUpdate(r, x => { x.weight = typed; x.wu = UNIT; delete x.weightBhy; x.purity = p; x.cost = c; x.date = d; x.error = ''; x.hold = ''; });
     closeModal(); render(); toast((navigator.onLine ? 'Saved ' : 'Saved offline. ') + formatTyped(typed, UNIT) + (navigator.onLine ? '. Syncing…' : ' Will sync when back online')); syncQueue();
   };
@@ -1445,6 +1595,16 @@ function pendingSaleVal(it, b) {
   if (base > 0 && g) return base * g;
   return null;
 }
+function qSplit() {
+  const c = { b: 0, r: 0, s: 0, o: 0 };
+  Q.forEach(x => { if (isPur(x)) c.b++; else if (isRefine(x)) c.r++; else if (isSale(x) || isOtherSale(x) || isDirect(x) || isGroupSale(x)) c.s++; else c.o++; });
+  return c;
+}
+function qSplitTxt(c) {
+  c = c || qSplit(); const p = [], w = (n, one, many) => { if (n) p.push(n + ' ' + (n === 1 ? one : many)); };
+  w(c.b, 'buy', 'buys'); w(c.r, 'refine', 'refines'); w(c.s, 'sale', 'sales'); w(c.o, 'other', 'other');
+  return p.join(' · ');
+}
 function renderNet() {
   const el = $('#netbar'); if (!el) return;
   const n = Q.length, bad = Q.filter(x => x.error || x.hold).length;
@@ -1452,10 +1612,10 @@ function renderNet() {
   if (!connected() || (!n && !off && !down)) { el.classList.add('hidden'); return; }
   let t;
   if (syncing && !off) t = `⟳ Syncing ${pendingQ().length || n} item${(pendingQ().length || n) === 1 ? '' : 's'}…`;
-  else if (off) t = n ? `📴 Offline. ${n} waiting to sync` : `📴 Offline. Showing data from ${whenTxt(lastSync)}`;
-  else if (down) t = n ? `⚠️ Can't reach the sheet. ${n} waiting to sync` : `⚠️ Can't reach the sheet. Showing data from ${whenTxt(lastSync)}`;
-  else t = bad ? `⚠️ ${n} waiting to sync · ${bad} need${bad === 1 ? 's' : ''} attention` : `⏳ ${n} waiting to sync`;
-  el.innerHTML = esc(t) + (n ? '<span class="go">View ›</span>' : '');
+  else if (off) t = n ? `📴 Offline · ${qSplitTxt()} waiting` : `📴 Offline. Showing data from ${whenTxt(lastSync)}`;
+  else if (down) t = n ? `⚠️ Can't reach the sheet · ${qSplitTxt()} waiting` : `⚠️ Can't reach the sheet. Showing data from ${whenTxt(lastSync)}`;
+  else t = bad ? `⚠️ ${qSplitTxt()} waiting · ${bad} need${bad === 1 ? 's' : ''} attention` : `⏳ ${qSplitTxt()} waiting to sync`;
+  el.innerHTML = '<span class="nbt">' + esc(t).split(' · ').map(x => x.length <= 28 ? '<span class="nw">' + x + '</span>' : x).join(' · ') + '</span>' + (n ? '<span class="go">View ›</span>' : '');
   el.classList.toggle('sync', !off && !down);
   el.classList.remove('hidden');
 }
@@ -2189,7 +2349,7 @@ function sellAct() {
 }
 function itemRowHTML(it, g) {   // g: profit group (Stock list, or Buy's always-shown list)
   g = typeof g === 'string' ? g : 'stock:list';
-  return `<div class="item"><span class="no">#${esc(dno(it))}${tsHTML(it.at, it.date)}</span><div class="body"><b>${formatWeight(itemBhy(it), UNIT)}</b> · ${pct(it.purity)}${directCovers(it) ? ' <span class="badge">sale waiting</span>' : ''}<br>
+  return `<div class="item"><span class="no">#${esc(dno(it))}${tsHTML(it.at, it.date)}</span><div class="body"><b>${formatWeight(itemBhy(it), UNIT)}</b> · ${pct(it.purity)}${busyBadge(it)}<br>
     <span class="muted">Cost ${peso(it.cost)} · Profit <b>${prof(it.projProfit, g)}</b></span></div>
     <div class="acts">${sellAct(it)}<button class="ed" aria-label="Edit #${esc(dno(it))}" onclick="editItem(${Number(it.no)})">✏️</button><button class="x" aria-label="Delete #${esc(dno(it))}" onclick="delItem(${Number(it.no)})">🗑️</button></div></div>`;
 }
@@ -2199,6 +2359,8 @@ function qProfit(it) { const v = qSell(it); return v == null ? null : v - it.cos
 const liveSync = () => !isOffline() && connected();
 function qBadge(it) {
   if (it.error || it.hold) return '';
+  const hw = waitingOn(it).map(refineOf).find(x => x && (x.error || x.hold));   // v58: held behind a refine that needs attention
+  if (hw) return `<span class="badge warn">on hold · ${esc(hw.batchId || 'refine')} needs attention</span>`;
   return liveSync() ? `<span class="badge syncing">${inflight === it.rid ? 'sending…' : 'syncing'}</span>` : `<span class="badge">waiting to sync</span>`;
 }
 function qHoldDisplay(msg) {
@@ -2216,15 +2378,16 @@ function qNotes(it, extra) {
 function qRowHTML(it, g) {
   g = typeof g === 'string' ? g : 'stock:list';
   const busyNow = inflight === it.rid;
-  return `<div class="item q${!it.error && !it.hold ? ' pend' : ''}" data-rid="${esc(it.rid)}"><span class="no"><span aria-hidden="true">${it.error ? '⚠️' : '⏳'}</span>${qAt(it) ? tsHTML(qAt(it)) : ''}</span><div class="body"><div class="qline"><b>${formatWeight(itemBhy(it), UNIT)}</b> · ${pct(it.purity)}</div> ${qBadge(it)}${directCovers(it) ? ' <span class="badge">sale waiting</span>' : ''}
+  return `<div class="item q${!it.error && !it.hold ? ' pend' : ''}" data-rid="${esc(it.rid)}"><span class="no"><span aria-hidden="true">${it.error ? '⚠️' : '⏳'}</span>${qAt(it) ? tsHTML(qAt(it)) : ''}</span><div class="body"><div class="qline"><b>${formatWeight(itemBhy(it), UNIT)}</b> · ${pct(it.purity)}</div> ${qBadge(it)}${busyBadge(it)}
     <span class="muted">Cost ${peso(it.cost)} · ${esc(fmtDate(it.date))}${!it.error && !it.hold ? ` · Profit <b>${prof(qProfit(it), g)}</b>` : ''}${busyNow && !liveSync() ? ' · sending…' : ''}</span></div>
     <div class="acts">${sellAct(it, true)}${it.error ? `<button class="ed" aria-label="Retry" title="Retry" onclick="qRetry('${esc(it.rid)}')">↻</button>` : ''}${it.hold ? `<button class="ed" aria-label="Send anyway" title="Send anyway" onclick="qRetry('${esc(it.rid)}',true)">⤴</button>` : ''}<button class="ed" aria-label="Edit unsynced purchase" onclick="qEdit('${esc(it.rid)}')">✏️</button><button class="x" aria-label="Delete unsynced purchase" onclick="qDel('${esc(it.rid)}')">🗑️</button></div>${qNotes(it)}</div>`;
 }
 // Online, unsynced purchases sit in the In stock list with a "syncing" badge (inlineQ); the card at the top
 // holds the rest: everything while offline / the sheet is unreachable, and any that need attention.
-const inlineQ = fresh => liveSync() ? (fresh ? Q : loadQ()).filter(x => isPur(x) && !x.error && !x.hold) : [];   // fresh: Q was just loaded
+// v58: online AND offline, waiting buys are in the In stock list (EV().pend); the card keeps the rest, with counts.
+const inlineQ = () => EV().pend;
 function qSaleRowHTML(it) {
-  const b = (ST && ST.batches || []).find(x => x.id === it.batchId), val = pendingSaleVal(it, b), cost = b ? Number(b.costInclFee) || 0 : 0;
+  const b = vBatchOf(it.batchId), val = pendingSaleVal(it, b), cost = b ? Number(b.costInclFee) || 0 : 0;
   const busyNow = inflight === it.rid;
   return `<div class="item q${!it.error && !it.hold ? ' pend' : ''}" data-rid="${esc(it.rid)}"><span class="no"><span aria-hidden="true">${it.error ? '⚠️' : '⏳'}</span></span><div class="body"><b><span class="qkind">Sale</span><span class="qid">${esc(it.batchId)}</span></b> ${qBadge(it)}<br>
     <span class="muted">${esc(fmtDate(it.sellDate))}${val != null ? ` · received ${peso(val)}` : ''}${val != null && b ? ` · Profit <b>${prof(val - cost, 'sales:sales')}</b>` : ''}${busyNow && !liveSync() ? ' · sending…' : ''}</span></div>
@@ -2257,14 +2420,17 @@ function qMiscRowHTML(it) {
     <div class="acts">${it.error ? `<button class="ed" aria-label="Retry" title="Retry" onclick="qRetry('${esc(it.rid)}')">↻</button>` : ''}${it.hold ? `<button class="ed" aria-label="Send anyway" title="Send anyway" onclick="qRetry('${esc(it.rid)}',true)">⤴</button>` : ''}${isOtherSale(it) || isEdit(it) || isDirect(it) || isGroupSale(it) || isCorrectDirect(it) || isUndoDirect(it) ? `<button class="ed" aria-label="Edit unsynced ${esc(qKindLabel(it))}" onclick="qEdit('${esc(it.rid)}')">✏️</button>` : ''}<button class="x" aria-label="Delete unsynced ${esc(qKindLabel(it))}" onclick="qDel('${esc(it.rid)}')">🗑️</button></div>${qNotes(it, it.uncertainAt ? `<span class="qhold">${esc(isUndoDirect(it) ? 'This may already be undone. If the sale is gone and the items are In stock, drop this. If the sale is still listed, send it again.' : isCorrectDirect(it) ? 'This may already be on the sheet. Check Sales before deleting it.' : 'This may already be on the sheet. Check before deleting it.')}</span>` : '')}</div>`;
 }
 function qAnyRowHTML(it) { return isSale(it) ? qSaleRowHTML(it) : isEst(it) ? qEstRowHTML(it) : isV48Action(it) ? qMiscRowHTML(it) : qRowHTML(it); }
-function queueHTML(inlQ) {   // inlQ: inlineQ() when the caller has it already
-  const inl = new Set((inlQ || inlineQ()).map(x => x.rid)), L = Q.filter(x => !inl.has(x.rid)); if (!L.length) return '';
-  return `<div class="card qcard" id="qCard"><h2><span>⏳ Waiting to sync (${L.length})</span><span class="qacts">${navigator.onLine && !syncing ? `<button class="btn sm gold" onclick="syncQueue()">Sync now</button>` : ''}<button type="button" class="btn sm light" onclick="downloadPending()">⬇️ Export</button></span></h2>
-    <div class="muted">Saved on this device${navigator.onLine ? '' : ' while offline'}. Purchases get a No. when they reach the sheet. Sales are not counted as confirmed profit until then. On iPhone, export a copy before you clear storage.</div>${L.map(qAnyRowHTML).join('')}</div>`;
+function queueHTML(inlQ, always) {   // inlQ: inlineQ() when the caller has it already; always: show the counts card even when every row is inline (v54, Lucas v58)
+  const inl = new Set((inlQ || inlineQ()).map(x => x.rid)), L = Q.filter(x => !inl.has(x.rid)); if (!Q.length || (!L.length && !always)) return '';
+  const nIn = Q.length - L.length;
+  return `<div class="card qcard" id="qCard"><h2><span>⏳ Waiting to sync (${Q.length})</span></h2>
+    <div class="qsplit" id="qSplit">${esc(qSplitTxt())}</div>
+    <div class="qbtns">${navigator.onLine && !syncing ? `<button type="button" class="btn sm gold" id="qSyncNow" onclick="syncQueue()">Sync now</button>` : ''}<button type="button" class="btn sm light" id="qExport" onclick="downloadPending()">⬇️ Export pending</button></div>
+    <div class="muted">Saved on this device${navigator.onLine ? '' : ' while offline'}. Purchases get a No. when they reach the sheet. Sales are not counted as confirmed profit until then. Later actions wait if they need those numbers. On iPhone, export a copy before you clear storage.${nIn ? ` ${nIn === 1 ? 'One purchase is' : nIn + ' purchases are'} in the In stock list${view === 'stock' ? ' below' : ''}.` : ''}</div>${L.map(qAnyRowHTML).join('')}</div>`;
 }
 function directCandidates(V) {
-  const sheet = ((V && V.L) || (ST && ST.stock) || []).filter(isDirectEligible);
-  const pend = (hasReceipts() ? unsyncedPurchases() : []).filter(isDirectEligible);
+  const sheet = ((V && V.L) || vStock()).filter(isDirectEligible).filter(x => !busyItem(x));
+  const pend = (hasReceipts() ? freeBuys() : []).filter(isDirectEligible);
   return { sheet, pend, n: sheet.length + pend.length };
 }
 function sellBtnHTML(V) {
@@ -2273,7 +2439,7 @@ function sellBtnHTML(V) {
   return `<button type="button" class="btn green" id="sellBtn" style="margin:0 0 12px" onclick="openGroup998()">Group 99.8%…</button>`;
 }
 function refineBtnHTML(n) {
-  const u = unsyncedPurchases().length, off = isOffline();
+  const u = freeBuys().length, off = isOffline();
   let why = '', disable = false;
   if (hasReceipts()) {
     if (u) why = `This will wait for the ${u} unsynced purchase${u === 1 ? '' : 's'} to reach the sheet first, then refine.`;
@@ -2349,7 +2515,7 @@ function sfPanelHTML(V) {
 // The list + totals for the current filter. Items saved together stay in their box; a box shows only its matching
 // items ("2 of 3 match") and is left out when none match.
 function stockView() {
-  loadQ(); const L = (ST.stock || []).slice().sort((a, b) => (a.no || 0) - (b.no || 0)), P = inlineQ(true), R = sfRanges(), on = sfOn(R);
+  const L = vStock().slice().sort((a, b) => (a.no || 0) - (b.no || 0)), P = inlineQ(), R = sfRanges(), on = sfOn(R);
   const G = stockGroups(L, P).map(g => ({ qid: g.qid, n: g.rows.length, rows: on ? g.rows.filter(x => sfMatch(x.it, R)) : g.rows })).filter(g => g.rows.length);
   const T = { c: 0, p: 0, w: 0, n: 0 };
   G.forEach(g => g.rows.forEach(x => { const it = x.it; T.n++; T.c += it.cost || 0; T.w += itemBhy(it); T.p += (x.q ? qProfit(it) : it.projProfit) || 0; }));
@@ -2358,9 +2524,9 @@ function stockView() {
 function stockBodyHTML(V) {
   const { G, T, on } = V;
   if (!G.length) return `<div class="empty" id="sfNone">No items match this filter.<br><button type="button" class="btn light sm" onclick="sfClear()">Clear filter</button></div>`;
-  const pendTR = it => `<tr class="pend" data-rid="${esc(it.rid)}"><td>⏳ ${qBadge(it)}${qAt(it) ? tsHTML(qAt(it)) : ''}${directCovers(it) ? ' <span class="badge">sale waiting</span>' : ''}</td><td>${formatMass(itemBhy(it), UNIT)}</td><td>${pct(it.purity)}</td><td>${peso(it.cost)}</td><td>${peso(qSell(it))}</td><td><b>${prof(qProfit(it), 'stock:list')}</b></td>
+  const pendTR = it => `<tr class="pend" data-rid="${esc(it.rid)}"><td>⏳ ${qBadge(it)}${qAt(it) ? tsHTML(qAt(it)) : ''}${busyBadge(it)}</td><td>${formatMass(itemBhy(it), UNIT)}</td><td>${pct(it.purity)}</td><td>${peso(it.cost)}</td><td>${peso(qSell(it))}</td><td><b>${prof(qProfit(it), 'stock:list')}</b></td>
       <td class="acts">${sellAct(it, true)}<button class="ed" aria-label="Edit unsynced purchase" onclick="qEdit('${esc(it.rid)}')">✏️</button> <button class="x" aria-label="Delete unsynced purchase" onclick="qDel('${esc(it.rid)}')">🗑️</button></td></tr>`;
-  const itemTR = it => `<tr data-no="${Number(it.no)}"><td>#${esc(dno(it))}${tsHTML(it.at, it.date)}${directCovers(it) ? ' <span class="badge">sale waiting</span>' : ''}</td><td>${formatMass(itemBhy(it), UNIT)}</td><td>${pct(it.purity)}</td><td>${peso(it.cost)}</td><td>${peso(it.projSell)}</td><td><b>${prof(it.projProfit, 'stock:list')}</b></td>
+  const itemTR = it => `<tr data-no="${Number(it.no)}"><td>#${esc(dno(it))}${tsHTML(it.at, it.date)}${busyBadge(it)}</td><td>${formatMass(itemBhy(it), UNIT)}</td><td>${pct(it.purity)}</td><td>${peso(it.cost)}</td><td>${peso(it.projSell)}</td><td><b>${prof(it.projProfit, 'stock:list')}</b></td>
       <td class="acts">${sellAct(it)}<button class="ed" aria-label="Edit #${esc(dno(it))}" onclick="editItem(${Number(it.no)})">✏️</button> <button class="x" aria-label="Delete #${esc(dno(it))}" onclick="delItem(${Number(it.no)})">🗑️</button></td></tr>`;
   const tr = x => x.q ? pendTR(x.it) : itemTR(x.it), mob = x => x.q ? qRowHTML(x.it) : itemRowHTML(x.it);
   const lbl = g => g.rows.length < g.n ? `${grpLbl(g.n)} · ${g.rows.length} match` : grpLbl(g.n);
@@ -2376,13 +2542,13 @@ function stockBodyHTML(V) {
     + (on ? `<div class="sftot" id="sfMobTot"><span>${T.n} shown</span><span>${formatWeight(T.w, UNIT)} · ${peso(T.c)}</span></div>` : '');
   return `${table}<div class="mobile-only">${list}</div>`;
 }
-const stockHeadHTML = V => `<span>In stock <span class="muted" id="stockN">${V.L.length} items${V.P.length ? ` · ${V.P.length} syncing` : ''}${V.on ? ` · ${V.shown} shown` : ''}</span></span>${eyeBtn('stock:list')}`;
+const stockHeadHTML = V => `<span>In stock <span class="muted" id="stockN">${V.L.length + V.P.length} items${V.P.length ? ` · ${V.P.length} ${liveSync() ? 'syncing' : 'not synced'}` : ''}${V.on ? ` · ${V.shown} shown` : ''}</span></span>${eyeBtn('stock:list')}`;
 const sfRefNote = V => V.on && V.shown < V.total ? `Batch refine takes all ${V.L.length} In stock items, also the ${V.total - V.shown} the filter hides.` : '';
 function stockHTML() {
   const V = stockView(), { L, P } = V;
-  if (!L.length && !P.length) return queueHTML(P) + `<div class="card empty">No items in stock${unsyncedPurchases().length ? ' in the sheet yet' : ''}.<br><button class="btn gold" onclick="go('buy')">＋ Add a purchase</button></div>`;
+  if (!L.length && !P.length) return queueHTML(P, true) + `<div class="card empty">No items in stock${unsyncedPurchases().length ? ' in the sheet yet' : ''}.<br><button class="btn gold" onclick="go('buy')">＋ Add a purchase</button></div>`;
   const rn = sfRefNote(V);
-  return queueHTML(P) + refineBtnHTML(L.length) + sellBtnHTML(V) + `<div class="note sfnote" id="sfRefNote"${rn ? '' : ' hidden'}>${esc(rn)}</div>
+  return queueHTML(P, true) + refineBtnHTML(L.length) + sellBtnHTML(V) + `<div class="note sfnote" id="sfRefNote"${rn ? '' : ' hidden'}>${esc(rn)}</div>
     <div class="card" id="stockCard"><h2 id="stockHead">${stockHeadHTML(V)}</h2>
     ${sfPanelHTML(V)}<div id="stockBody">${stockBodyHTML(V)}</div></div>`;
 }
@@ -2411,8 +2577,10 @@ function stockItem(no) { return (ST.stock || []).find(x => Number(x.no) === Numb
 function modal(html) { closeModal(); const m = document.createElement('div'); m.className = 'modal'; m.id = 'modal'; m.innerHTML = `<div class="sheet" role="dialog">${html}</div>`; document.body.appendChild(m); m.addEventListener('click', e => { if (e.target === m) closeModal(); }); applyEye(); return m; }
 function closeModal() { const m = $('#modal'); if (m) { m.remove(); applyEye(); } }
 document.addEventListener('keydown', e => { if (e.key === 'Escape') closeModal(); });
+function lockedMsg(it) { const r = refineCovers(it), x = r && refineOf(r); return x ? `#${dno(it)} is in batch ${x.batchId || ''} waiting to sync. Delete that refine first to change it.` : ''; }
 function editItem(no, existing) {
   const it = existing || stockItem(no); if (!it) return;
+  if (!existing && lockedMsg(it)) return toast(lockedMsg(it), 5000);
   no = existing ? existing.no : no;
   const bhy0 = existing ? itemBhy(existing) : it.weightBhy;
   modal(`<h2>Edit #${esc(dno(it))}</h2>
@@ -2442,6 +2610,8 @@ function editItem(no, existing) {
 }
 async function delItem(no) {
   const it = stockItem(no); if (!it) return;
+  if (lockedMsg(it)) return toast(lockedMsg(it), 5000);
+  if (directCovers(it) || addCovers(it)) return toast(`#${dno(it)} has a waiting ${directCovers(it) ? 'sale' : 'add to batch'}. Delete that first.`, 5000);
   if (!confirm(`Delete #${dno(it)}?\n${formatTyped(fromWire(itemBhy(it), UNIT), UNIT)} · ${pct(it.purity)} · cost ${peso(it.cost)}\n\nThis removes the row from the Purchases tab.`)) return;
   RECENT = RECENT.filter(x => Number(x.item.no) !== Number(no));   // a just-synced purchase must not come back after its delete
   if (canQueue('deletePurchase')) {
@@ -2478,7 +2648,7 @@ function refineSumHTML(p) {
       <div><span>Silver needed${p.silverExcl ? ` <small class="muted rnx">excl. ${p.silverExcl} item${p.silverExcl === 1 ? '' : 's'} ≥ ${fullPctTxt(p.fullMin)}</small>` : ''}</span><b>${grams(p.silverG)} g</b></div>`;
 }
 async function openRefine() {
-  const u = unsyncedPurchases();
+  const u = freeBuys();
   if (!hasReceipts()) {
     if (u.length) { render(); return alert('Some purchases are still waiting to sync. Sync them (or delete them) first so the batch includes everything.'); }
     if (!navigator.onLine) { render(); return alert(OFFLINE_MSG); }
@@ -2500,8 +2670,13 @@ async function openRefine() {
   const pend = hasReceipts() ? u : [];
   if (!p || !p.count && !pend.length) return toast('No items in stock');
   const bhy = (S() || {}).bhyPerGram || 2;
-  const L = (ST.stock || []).slice().sort((a, x) => (a.no || 0) - (x.no || 0));
+  // v54 (Lucas v58): items already in a waiting refine, direct sale or add-to-batch are not offered again.
+  const L = vStock().filter(it => !busyItem(it)).slice().sort((a, x) => (a.no || 0) - (x.no || 0));
   const total = L.length + pend.length;
+  if (!total) return toast('Every In stock item is already in a batch or sale waiting to sync.', 4500);
+  // Chin: with something already waiting, "all ticked" still sends only these items (pick), never every In stock row.
+  const busyAny = vStock().length !== L.length || purchasesQ().some(busyItem);
+  p = Object.assign({}, p, { defaultBatchId: freeBatchId(p.defaultBatchId) });
   const rows = L.map(it => `<label class="pick"><input type="checkbox" checked value="${Number(it.no)}"><span class="body">${pickLine(it)}</span></label>`).join('') +
     pend.map(it => `<label class="pick"><input type="checkbox" checked data-rid="${esc(it.rid)}" value=""><span class="body">${formatWeight(itemBhy(it), UNIT)} · ${pct(it.purity)} · ${peso(it.cost)} <span class="badge">waiting to sync</span></span></label>`).join('');
   const offNote = hasReceipts() && !navigator.onLine ? `<div class="muted">You're offline. This refine will be saved on this device and sent when you're back online.</div>` : '';
@@ -2518,14 +2693,14 @@ async function openRefine() {
     return { nos: b.filter(x => !x.dataset.rid).map(x => Number(x.value)).filter(n => n > 0), rids: b.filter(x => x.dataset.rid).map(x => x.dataset.rid), n: b.length }; };
   const isAll = s => s.n === boxes().length;
   const figs = s => {   // everything ticked and no purchase waiting: the sheet's own preview, as before
-    if (server && isAll(s) && !pend.length) return Object.assign({}, p, { count: p.count });
+    if (server && isAll(s) && !pend.length && !busyAny) return Object.assign({}, p, { count: p.count });
     const want = new Set(s.nos), wr = new Set(s.rids);
     const items = L.filter(x => want.has(Number(x.no))).map(x => ({ g: hasNum(x.weightBhy) ? Number(x.weightBhy) / bhy : Number(x.grams) || 0, p: Number(x.purity) || 0, c: Number(x.cost) || 0 }))
       .concat(pend.filter(x => wr.has(x.rid)).map(x => ({ g: itemBhy(x) / bhy, p: Number(x.purity) || 0, c: Number(x.cost) || 0 })));
     return refineCalc(items, p);
   };
   const upd = () => {
-    const s = sel(), all = isAll(s), f = figs(s), blocked = !all && !pickRefineOK();
+    const s = sel(), all = isAll(s), f = figs(s), blocked = !(all && !busyAny) && !pickRefineOK();
     $('#rnSum').innerHTML = refineSumHTML(f); applyEye();
     $('#rnPickN').textContent = `${s.n} of ${total} ticked`;
     $('#rnPickAll').textContent = all ? 'Select none' : 'Select all';
@@ -2537,17 +2712,20 @@ async function openRefine() {
   $('#rnPickAll').onclick = () => { const all = boxes(), on = !all.every(x => x.checked); all.forEach(x => { x.checked = on; }); upd(); };
   upd();
   $('#rgo').onclick = async () => {
-    const s = sel(), all = isAll(s); if (!s.n) return;
+    const s = sel(), all = isAll(s) && !busyAny; if (!s.n) return;
     if (!all && !pickRefineOK()) { upd(); return alert(PICK_OLD_API); }
     const uNow = unsyncedPurchases();
     if (!hasReceipts() && uNow.length) { closeModal(); render(); return alert('A purchase is waiting to sync. Sync it first so the batch includes it.'); }
     const batchId = $('#rid').value.trim() || p.defaultBatchId;
+    if (idTaken(batchId)) return toast(`Batch ID ${batchId} is already used. Pick another, or leave it blank.`, 4500);
     if (canQueue('batchRefine')) {
       const it = all ? { action: 'batchRefine', batchId, expectSheetNos: (p.nos || []).map(Number).filter(n => n > 0), waitRids: uNow.map(x => x.rid) }
                      : { action: 'batchRefine', batchId, pick: true, expectSheetNos: s.nos, waitRids: s.rids.filter(r => uNow.some(x => x.rid === r)) };
+      const want = new Set(s.nos), wr = new Set(s.rids);
+      Object.assign(it, refineSnap(all ? L : L.filter(x => want.has(Number(x.no))), all ? uNow : pend.filter(x => wr.has(x.rid)), p, false));
       const ok = await enqueue(it);
       if (!ok) return;
-      closeModal(); go('stock'); toast(navigator.onLine ? 'Refine queued. Syncing…' : 'Refine saved offline. Will sync when back online', 4000);
+      closeModal(); go('sales'); toast(navigator.onLine && !netDown ? 'Refine queued. Syncing…' : `Refine saved on this device. ${batchId} is on Refining as waiting to sync.`, 4500);
       syncQueue(); return;
     }
     const data = all ? { batchId: $('#rid').value.trim(), expectNos: p.nos } : { batchId: $('#rid').value.trim(), selectNos: s.nos, expectNos: s.nos };
@@ -2555,12 +2733,20 @@ async function openRefine() {
     if (r) { closeModal(); go('sales'); toast(safeMsg(r.message), 4000); }
   };
 }
+// v54 (Lucas v58): what a queued refine keeps so its pending batch (items, grams, cost, base) shows and opens offline.
+// Chin: totals via refineCalc (Lucas refineTotals); items keep their stored BHY / typed unit (directSnap).
+function idTaken(id) { id = String(id || '').trim(); return !!id && (vBatches().some(b => b.id === id) || Q.some(x => isRefine(x) && x.batchId === id)); }
+function refineSnap(items, pend, p, noFee) {
+  const all = (items || []).concat(pend || []), bhy = (S() || {}).bhyPerGram || 2;
+  const f = refineCalc(all.map(x => ({ g: itemG(x, bhy), p: Number(x.purity) || 0, c: Number(x.cost) || 0 })), p);
+  return { items: all.map(directSnap), base: round2(Number(f.base) || 0), fee: noFee ? 0 : round2(Number(f.fee) || 0), date: todayISO() };
+}
 function localRefinePreview() {
   const tot = rnTotals(), s = S() || {};
-  const nos = (ST && ST.stock || []).map(x => Number(x.no)).filter(n => n > 0);
+  const nos = vStock().filter(x => !busyItem(x)).map(x => Number(x.no)).filter(n => n > 0);
   const base = estBase(), value = base ? tot.ref * base : 0;
   return {
-    count: (ST && ST.stock || []).length, nos,
+    count: vStock().filter(x => !busyItem(x)).length, nos,
     rawG: tot.raw, refinedG: tot.ref, cost: tot.cost, fee: tot.fee, costInclFee: tot.cost + tot.fee,
     base, estValue: value, estProfit: value - tot.cost - tot.fee,
     silverG: tot.silver, silverExcl: tot.high, fullMin: s.fullMin, defaultBatchId: localDefaultBatchId()
@@ -2576,8 +2762,8 @@ function localRefinePreview() {
 // Never writes to the sheet. The base typed here is remembered on this device (RN_KEY); none typed = today's base.
 function rnTotals() {
   const s = S() || {}, bhy = s.bhyPerGram || 2;
-  const L = (ST && ST.stock || []).map(x => ({ g: hasNum(x.weightBhy) ? Number(x.weightBhy) / bhy : Number(x.grams) || 0, p: Number(x.purity) || 0, c: Number(x.cost) || 0, local: false }))
-    .concat(pendingQ().filter(isPur).map(x => ({ g: itemBhy(x) / bhy, p: Number(x.purity) || 0, c: Number(x.cost) || 0, local: true })));
+  const L = (ST ? vStock() : []).map(x => ({ g: hasNum(x.weightBhy) ? Number(x.weightBhy) / bhy : Number(x.grams) || 0, p: Number(x.purity) || 0, c: Number(x.cost) || 0, local: false }))
+    .concat((ST ? EV().pend : []).map(x => ({ g: itemBhy(x) / bhy, p: Number(x.purity) || 0, c: Number(x.cost) || 0, local: true })));
   const t = L.reduce((a, x) => { a.n++; a.raw += x.g; a.ref += x.g * x.p; a.cost += x.c; a.local += x.local ? 1 : 0;
     if (isFullPurity(x.p, s)) a.high++; else { a.sRaw += x.g; a.sRef += x.g * x.p; } return a; }, { n: 0, raw: 0, ref: 0, cost: 0, local: 0, high: 0, sRaw: 0, sRef: 0 });
   t.fee = t.n ? (Number(s.refiningFee) || 0) : 0;
@@ -2664,7 +2850,7 @@ function beOutHTML(b, c) {
 const beKey = b => encodeURIComponent(b.id).replace(/[^A-Za-z0-9]/g, '_');
 function beSrcHTML(b, v) {
   const queued = Q.some(x => isEst(x) && x.batchId === b.id);
-  const where = !(v.pending || queued) ? (beV7() ? 'Saved on the sheet (PC + phone)' : 'Saved on this device')
+  const where = b.pending ? 'Saved on this device · goes to the sheet right after this batch syncs' : !(v.pending || queued) ? (beV7() ? 'Saved on the sheet (PC + phone)' : 'Saved on this device')
     : beV7() ? (isOffline() || queued ? 'Saved on this device · goes to the sheet when online' : 'Saving to the sheet…') : 'Saved on this device · shared with your other devices once Api.gs v7 is deployed';
   return `<span class="beWhere">${esc(where)}</span>${v.base != null ? `<button type="button" class="btn light sm beReset" onmousedown="event.preventDefault()" onclick="beReset(this)">Use batch base ${peso(b.base)}</button>` : ''}`;
 }
@@ -2679,7 +2865,7 @@ function beHTML(b) {
     <div class="besrc">${beSrcHTML(b, v)}</div></div>`;
 }
 const beBox = el => el && el.closest('.best');
-const beBatch = box => box && (ST.batches || []).find(x => x.id === box.dataset.id);
+const beBatch = box => box && vBatchOf(box.dataset.id);
 function beUpdate(box) {   // live: only this batch's figures + source line are redrawn (the boxes keep focus)
   const b = beBatch(box); if (!b) return;
   box.querySelector('.beOut').innerHTML = beOutHTML(b, beCalc(b, box.querySelector('.beB').value, box.querySelector('.beG').value));
@@ -2727,7 +2913,7 @@ function bindBE() {
 let beBusy = false;
 async function beFlush() {
   if (beBusy || !beV7() || !connected()) return;
-  const ids = new Set((ST.batches || []).map(x => x.id));
+  const ids = new Set(vBatches().filter(b => !b.pending || b.id).map(x => x.id));
   const all = beAll();
   const todo = Object.keys(all).filter(id => (all[id].pb || all[id].pa) && ids.has(id));
   if (!todo.length) return;
@@ -2759,7 +2945,7 @@ const beTyping = () => view === 'sales' && !!document.activeElement && !!beBox(d
 // batches itself too. Added items keep their own purchase date / cost and take the batch's frozen base; the batch's
 // items, grams, cost and silver are sheet formulas, so they follow. A typed "Actual refined weight" is the weight
 // that came back from the refiner, so it is never changed: the app warns before and reminds on the card after.
-const batchOf = id => (ST && ST.batches || []).find(x => x.id === id);
+const batchOf = id => ST ? vBatchOf(id) : undefined;
 const beChanged = id => !!(beAll()[id] || {}).chg;
 function beForget(id) { const all = beAll(); if (all[id]) { delete all[id]; save(BE_KEY, all); } }   // v40: batch undone
 function beMarkChanged(id) { const all = beAll(), e = all[id] || {}; e.chg = true; all[id] = e; save(BE_KEY, all); }
@@ -2771,8 +2957,8 @@ function batchActHTML(b) {
 const pickLine = it => `<b>#${esc(dno(it))}</b> · ${formatWeight(itemBhy(it), UNIT)} · ${pct(it.purity)} · ${peso(it.cost)}${tsHTML(it.at, it.date)}`;
 function openAddToBatch(id) {
   const b = batchOf(id); if (!b || !b.canAdd) return toast('This batch can no longer take items.');
-  const L = (ST.stock || []).slice().sort((a, x) => (a.no || 0) - (x.no || 0)), act = beVals(b).actual;
-  const pend = hasReceipts() ? unsyncedPurchases() : [];
+  const L = vStock().filter(it => !busyItem(it)).slice().sort((a, x) => (a.no || 0) - (x.no || 0)), act = beVals(b).actual;
+  const pend = hasReceipts() ? freeBuys() : [];
   if (!L.length && !pend.length) return toast(unsyncedPurchases().length ? 'Wait until your purchases reach the sheet.' : 'Nothing In stock to add.');
   const pendPick = pend.map((it, i) => `<label class="pick"><input type="checkbox" data-rid="${esc(it.rid)}" value=""><span class="body">${formatWeight(itemBhy(it), UNIT)} · ${pct(it.purity)} · ${peso(it.cost)} <span class="badge">waiting to sync</span></span></label>`).join('');
   modal(`<h2>➕ Add to ${esc(id)}</h2><div class="muted">Tick the In stock items to put into this batch. They take its base ${peso(b.base)} / g and move to the Archive tab with it.${pend.length ? ' Purchases still waiting to sync can be included: they will be added after they get a No.' : ''}</div>
@@ -2806,8 +2992,15 @@ function openAddToBatch(id) {
     if (j) { if (act != null) beMarkChanged(id); closeModal(); render(); toast(safeMsg(j.message), 5000); }
   };
 }
+function pendingItemsModal(b) {   // v58: a batch waiting to sync lists the items this device put in it (works offline)
+  const L = (b.members || []).slice().sort((a, x) => (Number(a.no) > 0 ? 0 : 1) - (Number(x.no) > 0 ? 0 : 1) || (a.no || 0) - (x.no || 0));
+  modal(`<h2>📋 Items in ${esc(b.id || 'new batch')}</h2><div class="muted" id="biPend">${L.length} item${L.length === 1 ? '' : 's'} · waiting to sync. Adding or taking out items is available after this syncs.</div>
+    <div id="biList">${L.map(it => `<div class="item"><div class="body">${Number(it.no) > 0 && !(it.rid && Q.some(x => x.rid === it.rid)) ? pickLine(it) : `${formatWeight(itemBhy(it), UNIT)} · ${pct(it.purity)} · ${peso(it.cost)} <span class="badge">waiting to sync</span>`}</div></div>`).join('')}</div>
+    <button class="btn light" onclick="closeModal()">Close</button>`);
+}
 async function openBatchItems(id) {
   const b = batchOf(id); if (!b) return;
+  if (b.pending) return pendingItemsModal(b);
   if (!navigator.onLine) return alert(OFFLINE_MSG);
   modal(`<h2>📋 Items in ${esc(id)}</h2><div class="muted" id="biWait">Loading from the sheet…</div>`);
   let j; try { j = await api('batchItems', { batchId: id }); } catch (e) { if ($('#biWait')) $('#biWait').textContent = e.message; return; }
@@ -2859,7 +3052,7 @@ async function openGroup998() {
   if (!p) p = localRefinePreview();
   if (OFFBASE != null && p) p = Object.assign({}, p, { base: OFFBASE });
   render();
-  const below = ((ST && ST.stock) || []).length + (hasReceipts() ? unsyncedPurchases().length : 0) - pool.sheet.length - pool.pend.length;
+  const below = vStock().filter(x => !busyItem(x)).length + (hasReceipts() ? freeBuys().length : 0) - pool.sheet.length - pool.pend.length;
   const defId = freeBatchId(p.defaultBatchId);
   const row = (it, kind, key) => `<label class="pick"><input type="checkbox" data-${kind}="${esc(key)}" aria-label="Group ${kind === 'no' ? '#' + esc(dno(it)) : 'unsynced purchase'}"><span class="body">${kind === 'no' ? pickLine(it) : `${saleWt(it)} · ${pct(it.purity)} · ${peso(it.cost)} <span class="badge">waiting to sync</span>`}</span></label>`;
   const offNote = !navigator.onLine ? `<div class="muted">You're offline. This group is saved on this device and moves to Refining when you're back online.</div>` : '';
@@ -2896,17 +3089,19 @@ async function openGroup998() {
   $('#gpGo').onclick = async () => {
     const sel = picked(); if (!sel.length) return;
     const batchId = $('#gpid').value.trim() || defId;
+    if (idTaken(batchId)) return toast(`Batch ID ${batchId} is already used. Pick another, or leave it blank.`, 4500);
     const nos = sel.filter(x => Number(x.no) > 0).map(x => Number(x.no));
     const live = new Set(unsyncedPurchases().map(x => x.rid));
     const waitRids = sel.map(x => x.rid).filter(r => r && live.has(r));
     if (canQueue('batchRefine')) {
       const queued = { action: 'batchRefine', batchId, expectSheetNos: nos.slice().sort((a, b) => a - b), waitRids, pick: true };
       if (noFee) queued.noFee = true;
+      Object.assign(queued, refineSnap(sel.filter(x => !x.rid), sel.filter(x => x.rid), p, !!queued.noFee));
       const ok = await enqueue(queued);
       if (!ok) return;
       closeModal(); go('sales');
-      if (!navigator.onLine) return toast('Grouped offline. It will show on Refining when you are back online. Sell it there.', 4500);
-      toast(netDown ? 'Grouped on this device. It will show on Refining when the sheet answers.' : 'Grouped. Sell the batch from Refining once it syncs.', 4000);
+      if (!navigator.onLine) return toast(`Grouped offline. ${batchId} is on Refining as waiting to sync. You can sell it there now.`, 4500);
+      toast(netDown ? `Grouped on this device. ${batchId} is on Refining as waiting to sync.` : 'Grouped. Syncing…', 4000);
       syncQueue(); return;
     }
     if (!navigator.onLine) return alert(OFFLINE_MSG);
@@ -2938,9 +3133,9 @@ function directFigures(items, base, amt) {
 function directSnap(it) {
   return { no: Number(it.no) || 0, bno: it.bno != null && it.bno !== '' ? it.bno : null, rid: it.rid || '', weightBhy: itemBhy(it) || Number(it.weightBhy) || 0, weight: it.weight, wu: it.wu, grams: it.grams, purity: it.purity, cost: it.cost, at: it.at || '', date: it.date || '' };
 }
-function directPool() {
-  const sheet = ((ST && ST.stock) || []).filter(isDirectEligible).map(directSnap);
-  const pend = (hasReceipts() ? unsyncedPurchases() : []).filter(isDirectEligible).map(directSnap);
+function directPool() {   // v58: never an item already in a waiting refine / sale / add-to-batch
+  const sheet = vStock().filter(x => !busyItem(x)).filter(isDirectEligible).map(directSnap);
+  const pend = (hasReceipts() ? freeBuys() : []).filter(isDirectEligible).map(directSnap);
   return { sheet, pend };
 }
 function openDirectSale(preset, existing) {
@@ -2955,7 +3150,7 @@ function openDirectSale(preset, existing) {
     return directReview(items, null);
   }
   if (!pool.sheet.length && !pool.pend.length) return toast('No 99.8% items in stock to sell.');
-  const below = ((ST && ST.stock) || []).length + (hasReceipts() ? unsyncedPurchases().length : 0) - pool.sheet.length - pool.pend.length;
+  const below = vStock().filter(x => !busyItem(x)).length + (hasReceipts() ? freeBuys().length : 0) - pool.sheet.length - pool.pend.length;
   const row = (it, kind, key) => `<label class="pick"><input type="checkbox" data-${kind}="${esc(key)}" aria-label="Sell ${kind === 'no' ? '#' + esc(dno(it)) : 'unsynced purchase'}"><span class="body">${kind === 'no' ? pickLine(it) : `${saleWt(it)} · ${pct(it.purity)} · ${peso(it.cost)} <span class="badge">waiting to sync</span>`}</span></label>`;
   modal(`<h2 id="dsTitle">Sell 99.8%</h2>
     <div class="muted">Tick the items to sell as they are. Nothing is refined and there is no refining fee. Items below 99.8% are not listed.</div>
@@ -3035,7 +3230,7 @@ function directReview(items, existing) {
   };
 }
 function openRefBatches() {
-  return (ST.batches || []).filter(b => b.status === 'Refining' && !b.recorded && !pendingSaleFor(b.id) && !pendingGroupFor(b.id));
+  return vBatches().filter(b => !(b.pending && (!b.id || b.held))).filter(b => b.status === 'Refining' && !b.recorded && !pendingSaleFor(b.id) && !pendingGroupFor(b.id));
 }
 function batchGroupFigures(batches, base, amt) {
   const t = (batches || []).reduce((a, b) => { a.n++; a.g += Number(b.refinedG) || 0; a.c += Number(b.costInclFee) || 0; return a; }, { n: 0, g: 0, c: 0 });
@@ -3048,7 +3243,7 @@ function batchGroupFigures(batches, base, amt) {
 function openBatchGroup(existing) {
   if (!hasDirectSale()) return alert('Update the sheet script (Api.gs v16) to sell refined batches as a group. Until then, Record sale on a batch still keeps it on this tab until the sale is recorded.');
   if (existing) {
-    const picked = (existing.batchIds || []).map(id => (ST.batches || []).find(b => b.id === id)).filter(Boolean);
+    const picked = (existing.batchIds || []).map(id => vBatchOf(id)).filter(Boolean);
     return batchGroupReview(picked, existing);
   }
   const L = openRefBatches();
@@ -3238,6 +3433,8 @@ function waiveBatchFee(id, existing) {
   if (!hasNoFee() && !it) return alert(NOFEE_OLD_API);
   const b = batchOf(id);
   if (!b && !it) return toast('That batch is not on the Refining list.');
+  if (b && !it && pendBlock(b)) return toast(pendBlock(b), 4500);
+  if (b && !it && b.pending && b.noFee) return toast('This batch already has no refining fee.');
   if (b && b.status !== 'Refining' && !it) return toast('This batch is already sold, so its cost stays as recorded.');
   modal(`<h2 id="nfTitle">No fee (99.8%)</h2>
     <p id="nfWho"><b>${esc(id)}</b></p>
@@ -3276,22 +3473,34 @@ function saleKindTxt(batch) {
 function pendingGroupFor(id) { return Q.find(x => isGroupSale(x) && (x.batchIds || []).indexOf(id) >= 0); }
 // A recorded sale (status Sold) leaves the Refining list. A grouped or queued sale has not been recorded yet, so the batch stays.
 function batchListed(b) { return !!(b && (b.status !== 'Sold' || pendingSaleFor(b.id) || pendingGroupFor(b.id))); }
+function pendBlock(b) {   // v58: why a batch waiting to sync can't do something yet
+  if (!b || !b.pending) return '';
+  if (!b.id) return 'This batch gets its ID when it syncs. Selling it is available after that.';
+  if (b.held) return `Batch ${b.id} needs attention in the waiting list first.`;
+  return '';
+}
+function pendBatchHTML(b) {
+  if (!b.pending) return '';
+  const r = refineOf(b.rid) || {};
+  return `<div class="muted pbnote" id="pbNote_${beKey(b)}">${b.held ? `⚠️ The sheet could not make this batch yet: ${esc(b.held)}` : `Saved on this device. The sheet makes this batch when it syncs${r.retargetFrom ? ` (ID changed from ${esc(r.retargetFrom)})` : ''}. Refined weight, No fee and Sell refined can be done now; they sync right after it.`}</div>
+    <div class="bact pb"><button type="button" class="btn light sm bItems" data-bid="${esc(b.id)}" onclick="openBatchItems(this.dataset.bid)">📋 Items</button><span class="muted pbwait">Add / take out items: available after this syncs</span></div>`;
+}
 function salesRestHTML() {
-  const B = (ST.batches || []).filter(batchListed);
-  const hiddenSold = (ST.batches || []).filter(b => b.status === 'Sold' && !batchListed(b)).length;
+  const B = vBatches().filter(batchListed);
+  const hiddenSold = vBatches().filter(b => b.status === 'Sold' && !batchListed(b)).length;
   const sellRef = openRefBatches().length && hasDirectSale() ? `<button type="button" class="btn green" id="sellRefBtn" style="margin:0 0 12px" onclick="openBatchGroup()">Sell refined…</button>` : '';
   const batches = B.length ? B.map(b => { const grp = pendingGroupFor(b.id), pend = pendingSaleFor(b.id) || grp, stillOpen = b.status === 'Refining' && !pend;
-    const badge = pend ? `<span class="badge wait">waiting to sync</span>` : `<span class="badge ${b.status === 'Sold' ? 'sold' : b.status === 'Refining' ? '' : 'warn'}">${esc(b.status)}</span>`;
+    const badge = b.pending && b.held ? `<span class="badge warn">needs attention</span>` : pend || b.pending ? `<span class="badge wait">waiting to sync</span>` : `<span class="badge ${b.status === 'Sold' ? 'sold' : b.status === 'Refining' ? '' : 'warn'}">${esc(b.status)}</span>`;
     const btn = grp && !pendingSaleFor(b.id) ? `<button class="btn gold" data-id="${esc(b.id)}" onclick="openBatchGroup(pendingGroupFor(this.dataset.id))">⏳ Sale waiting to sync</button>`
       : pend ? `<button class="btn gold" data-id="${esc(b.id)}" onclick="openSale(this.dataset.id)">⏳ Sale waiting to sync</button>`
       : `<button class="btn ${b.status === 'Refining' ? 'green' : 'light'}" data-id="${esc(b.id)}" onclick="openSale(this.dataset.id)">${b.status === 'Refining' ? '✅ Record sale' : '✏️ Correct sale'}</button>`;
-    return `<div class="batch${pend ? ' q pend' : ''}" data-bid="${esc(b.id)}"><div class="top"><b>${esc(b.id)}</b>${badge}</div>
+    return `<div class="batch${pend || b.pending ? ' q pend' : ''}${b.pending ? ' pbatch' : ''}" data-bid="${esc(b.id)}"><div class="top"><b>${esc(b.id || 'New batch')}</b>${badge}</div>
     <div class="grid"><div><span>Date</span><br><b>${fmtDate(b.date)}</b></div><div><span>Items</span><br><b>${esc(b.items ?? '–')}</b></div>
     ${hasNum(b.rawG) ? `<div class="bRaw"><span>Raw weight before refining</span><br><b>${grams(b.rawG)} g</b></div>` : ''}<div><span>Refined (est.)</span><br><b>${grams(b.refinedG)} g</b></div>
     ${hasNum(b.silverG) ? `<div class="bSilver"><span>Silver needed</span><br><b>${grams(b.silverG)} g</b></div>` : ''}${stillOpen || pend ? '' : `<div><span>Base</span><br><b>${peso(b.base)}</b></div>`}
     ${stillOpen || pend ? `<div><span>${b.noFee ? 'Cost' : 'Cost incl. fee'}</span><br><b>${peso(b.noFee && hasNum(b.itemsCost) ? b.itemsCost : b.costInclFee)}</b></div>`
       : `<div><span>Sold</span><br><b>${fmtDate(b.sellDate)}</b></div><div><span>Received</span><br><b>${peso(b.actualValue)}</b></div><div><span>Profit</span><br><b>${prof(b.actualProfit, 'sales:batches')}</b></div>`}</div>
-    ${b.status === 'Refining' ? beHTML(b) : ''}${pend ? `<div class="muted" style="margin:8px 0">Sale saved on this device · not confirmed profit until it reaches the sheet.</div>` : ''}${b.canAdd && !pend ? batchActHTML(b) : ''}${stillOpen && !pend ? noFeeHTML(b) : ''}
+    ${b.status === 'Refining' && !(b.pending && !b.id) ? beHTML(b) : ''}${pend ? `<div class="muted" style="margin:8px 0">Sale saved on this device · not confirmed profit until it reaches the sheet.</div>` : ''}${pendBatchHTML(b)}${b.canAdd && !pend ? batchActHTML(b) : ''}${stillOpen && !pend && !pendBlock(b) ? noFeeHTML(b) : ''}
     ${btn}</div>`; }).join('')
     : `<div class="empty" id="batchEmpty">${hiddenSold ? 'Sold batches are listed under Recent sales.' : 'No refining batches yet. Use Batch refine on the Stock screen.'}</div>`;
   const L = ST.sales || [], pendS = salesQ();
@@ -3299,7 +3508,7 @@ function salesRestHTML() {
     if (isGroupSale(it)) return `<div class="sale pend"><div><b>${fmtDate(it.sellDate)}</b><br><span class="muted">Refined batches · waiting to sync · ${(it.batchIds || []).map(esc).join(', ')} · still on the Refining tab</span></div><span class="muted">Not confirmed</span></div>`;
     if (isDirect(it)) { const fig = directFigures(it.items || [], parseNum(it.sellBase), parseNum(it.actualAmt)); return `<div class="sale pend"><div><b>${fmtDate(it.sellDate)}</b><br><span class="muted">Direct sale · waiting to sync · ${(it.items || []).length} item${(it.items || []).length === 1 ? '' : 's'}${fig.received != null ? ' · received ' + peso(fig.received) : ''}</span></div><span class="muted">Not confirmed</span></div>`; }
     if (isOtherSale(it)) return `<div class="sale pend"><div><b>${fmtDate(it.date)}</b><br><span class="muted">Other sale · waiting to sync · received ${peso(it.actual)}</span></div><span class="muted">Not confirmed</span></div>`;
-    const b = (ST.batches || []).find(x => x.id === it.batchId), val = pendingSaleVal(it, b), cost = b ? Number(b.costInclFee) || 0 : 0;
+    const b = vBatchOf(it.batchId), val = pendingSaleVal(it, b), cost = b ? Number(b.costInclFee) || 0 : 0;
     return `<div class="sale pend"><div><b>${fmtDate(it.sellDate)}</b><br><span class="muted">Batch ${esc(it.batchId)} · waiting to sync${val != null ? ' · received ' + peso(val) : ''}</span></div><span class="muted">Not confirmed</span></div>`; }).join('');
   const correctBtn = s => {
     const id = String(s.batch || '');
@@ -3311,7 +3520,7 @@ function salesRestHTML() {
       const u = `<button type="button" class="btn light sm undo" data-sale="${esc(id)}" onclick="openUndoDirect(this.dataset.sale)">Undo sale</button>`;
       return `<span class="sacts">${c}${u}</span>`;
     }
-    return (id && (ST.batches || []).some(b => b.id === id)) ? `<button type="button" class="btn light sm" data-id="${esc(id)}" onclick="openSale(this.dataset.id)">Correct</button>` : '';
+    return (id && vBatches().some(b => b.id === id && !b.pending)) ? `<button type="button" class="btn light sm" data-id="${esc(id)}" onclick="openSale(this.dataset.id)">Correct</button>` : '';
   };
   const oldDirect = !hasDirectTools() && L.some(s => isDirectId(s.batch));
   const sales = (pendRows || L.length) ? (oldDirect ? `<div class="note" id="dsOld">Update the sheet script (Api.gs v17) to correct or undo a direct sale.</div>` : '') + pendRows + L.map(s => `<div class="sale"><div><b>${fmtDate(s.date)}</b><br><span class="muted">${esc(saleKindTxt(s.batch))} · received ${peso(s.actual)}</span>${correctBtn(s)}</div><b>${prof(s.profit, 'sales:sales')}</b></div>`).join('')
@@ -3320,7 +3529,8 @@ function salesRestHTML() {
     <div class="card"><h2><span>Recent sales <span class="muted">profit</span></span>${eyeBtn('sales:sales')}</h2>${sales}<button class="btn light" onclick="openOtherSale()">＋ Add other sale</button></div></div>`;
 }
 function openSale(id, existing) {
-  const b = (ST.batches || []).find(x => x.id === id); if (!b) return;
+  const b = vBatchOf(id); if (!b) return;
+  if (!existing && !pendingSaleFor(id) && pendBlock(b)) return toast(pendBlock(b), 4500);
   const pend = existing || pendingSaleFor(id);
   if (pend && pend.uncertainAt && inflight === pend.rid) return toast('Sending this sale now. Try again in a moment.');
   const ev = b.status === 'Refining' ? beVals(b) : null;   // v22: the Base typed on the batch prefills the sell base
@@ -3390,8 +3600,9 @@ function openOtherSale(existing) {
 // In-stock boxes, from the stock the app already has (getState) plus purchases still on this device.
 function stockRows() {
   const s = S() || {}, bhy = s.bhyPerGram || 2;
-  const sheet = (ST.stock || []).map(x => ({ date: String(x.date || ''), grams: gOf(x, bhy), purity: Number(x.purity) || 0, cost: Number(x.cost) || 0, local: false }));
-  const local = pendingQ().filter(isPur).map(x => ({ date: String(x.date || ''), grams: itemBhy(x) / bhy, purity: Number(x.purity) || 0, cost: Number(x.cost) || 0, local: true }));
+  // v58: the effective view. Items in a waiting refine are in its pending batch (Refined, not sold), never also here.
+  const sheet = vStock().map(x => ({ date: String(x.date || ''), grams: gOf(x, bhy), purity: Number(x.purity) || 0, cost: Number(x.cost) || 0, local: false }));
+  const local = EV().pend.map(x => ({ date: String(x.date || ''), grams: itemBhy(x) / bhy, purity: Number(x.purity) || 0, cost: Number(x.cost) || 0, local: true }));
   return sheet.concat(local);
 }
 function stockSum(L) {
@@ -3422,6 +3633,7 @@ const fcCif = b => hasNum(b.costInclFee) ? round2(b.costInclFee) : null;
 const fcStale = (k, b) => !!(k && k.at && b.at && k.at !== b.at);
 function fcForget(id) { const all = load(FC_KEY) || {}; if (all[id]) { delete all[id]; save(FC_KEY, all); } [...fcTried].forEach(x => { if (x.startsWith(id + '|')) fcTried.delete(x); }); }
 function batchCost(b, fc) {
+  if (b && b.pending) return round2(Number(b.costInclFee) || 0);   // v58: a batch waiting to sync: its own items + fee
   if (b && b.noFee) return round2(hasNum(b.itemsCost) ? Number(b.itemsCost) : (fcCif(b) || 0));   // v52: no refining fee on this batch
   const k0 = (fc || load(FC_KEY) || {})[b.id], k = fcStale(k0, b) ? null : k0, cif = fcCif(b), ok = k && hasNum(k.cost) && hasNum(k.fee);
   if (ok && k.sig === fcSig(b)) return k.cost + k.fee;                                 // locked
@@ -3465,7 +3677,7 @@ async function fcCheck() {   // after a Dashboard draw: lock each open batch's f
 }
 function refRows() {
   const base = estBase(), fc = load(FC_KEY) || {};
-  return (ST.batches || []).filter(b => b.status === 'Refining').map(b => {
+  return vBatches().filter(b => b.status === 'Refining').map(b => {
     const a = beVals(b).actual, act = a != null && a > 0, ref = act ? a : Number(b.refinedG) || 0;
     return { id: b.id, n: Number(b.items) || 0, raw: Number(b.rawG) || 0, ref, act, c: batchCost(b, fc), v: base * ref };
   });
@@ -3934,6 +4146,7 @@ function bkInit() {
 function openUndoBatch() {
   if (!connected()) return toast('Connect to the sheet first');
   if (!navigator.onLine) return alert(OFFLINE_MSG);
+  if (Q.some(isRefine)) return toast('Undo last refining batch is available after the waiting refine syncs.', 4500);
   const B = (ST && ST.batches) || [], b = B[0];   // newest first
   const box = (h, body) => modal(`<h2>${h}</h2>${body}<button class="btn light" onclick="closeModal()">Close</button>`);
   if (!(Number(ST.version) >= 11)) return box('↩ Undo last refining batch', `<div class="note">Your sheet's Api.gs is older than v11, so it cannot undo a batch yet. Paste the new Api.gs in Apps Script and make a New version of the deployment, then try again. Nothing was changed.</div>`);
